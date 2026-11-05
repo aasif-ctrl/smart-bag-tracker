@@ -1,0 +1,312 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Luggage Tracker</title>
+
+<link rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+body {
+  font-family:Arial;
+  background:#111827;
+  color:white;
+  text-align:center;
+  margin:0;
+}
+h2 { color:#38bdf8; }
+
+.card {
+  background:#1f2937;
+  margin:12px;
+  padding:15px;
+  border-radius:12px;
+}
+
+#map {
+  height:350px;
+  margin:12px;
+  border-radius:12px;
+}
+
+button {
+  padding:12px;
+  background:#0284c7;
+  color:white;
+  border:0;
+  border-radius:8px;
+  margin:5px;
+  cursor:pointer;
+}
+</style>
+</head>
+
+<body>
+
+<h2>SMART LUGGAGE TRACKER</h2>
+
+<div class="card">
+  <h3>Bluetooth Connection</h3>
+  <p id="connection">Disconnected</p>
+  <button onclick="connectBluetooth()">
+    Connect to ESP32
+  </button>
+</div>
+
+<div class="card">
+  <h3>Bag GPS Location</h3>
+  <p id="bag">Waiting for GPS...</p>
+</div>
+
+<div id="map"></div>
+
+<div class="card">
+  <h3>Phone to Bag Distance</h3>
+  <p id="distance">Waiting for phone GPS...</p>
+  <button onclick="getPhoneLocation()">
+    Enable Phone Location
+  </button>
+</div>
+
+<div class="card">
+  <h3>Alarm Status</h3>
+  <p id="alarm">ARMED</p>
+</div>
+
+<script>
+
+// ---------- BLUETOOTH UUIDs ----------
+
+const SERVICE_UUID =
+"4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+
+const CHARACTERISTIC_UUID =
+"beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+// ---------- MAP ----------
+
+let map = L.map('map').setView([11,78],5);
+
+L.tileLayer(
+  'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {
+    attribution:'OpenStreetMap'
+  }
+).addTo(map);
+
+let bagMarker = null;
+let phoneMarker = null;
+
+let bagLat = null;
+let bagLon = null;
+let phoneLat = null;
+let phoneLon = null;
+
+// ---------- DISTANCE ----------
+
+function distanceKm(lat1,lon1,lat2,lon2) {
+
+  const R = 6371;
+
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLon = (lon2-lon1)*Math.PI/180;
+
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(lat1*Math.PI/180) *
+    Math.cos(lat2*Math.PI/180) *
+    Math.sin(dLon/2)**2;
+
+  return R*2*Math.atan2(
+    Math.sqrt(a),
+    Math.sqrt(1-a)
+  );
+}
+
+function updateDistance() {
+
+  if(bagLat !== null && phoneLat !== null) {
+
+    let d = distanceKm(
+      bagLat,bagLon,phoneLat,phoneLon
+    );
+
+    document.getElementById("distance").innerHTML =
+      d < 1 ?
+      (d*1000).toFixed(1)+" meters" :
+      d.toFixed(3)+" km";
+  }
+}
+
+// ---------- PHONE GPS ----------
+
+function getPhoneLocation() {
+
+  if(!navigator.geolocation) {
+    alert("GPS not supported");
+    return;
+  }
+
+  navigator.geolocation.watchPosition(
+
+    function(position) {
+
+      phoneLat = position.coords.latitude;
+      phoneLon = position.coords.longitude;
+
+      if(phoneMarker === null) {
+
+        phoneMarker = L.marker(
+          [phoneLat,phoneLon]
+        ).addTo(map).bindPopup("Your Phone");
+
+      } else {
+
+        phoneMarker.setLatLng([phoneLat,phoneLon]);
+      }
+
+      updateDistance();
+    },
+
+    function(error) {
+      alert("Phone location permission required");
+    },
+
+    {
+      enableHighAccuracy:true
+    }
+  );
+}
+
+// ---------- UPDATE BAG DATA ----------
+
+function updateBag(data) {
+
+  if(data.valid) {
+
+    bagLat = data.lat;
+    bagLon = data.lon;
+
+    document.getElementById("bag").innerHTML =
+      "Latitude: "+bagLat.toFixed(6)+
+      "<br>Longitude: "+bagLon.toFixed(6);
+
+    if(bagMarker === null) {
+
+      bagMarker = L.marker(
+        [bagLat,bagLon]
+      ).addTo(map).bindPopup("Your Bag");
+
+    } else {
+
+      bagMarker.setLatLng([bagLat,bagLon]);
+    }
+
+    map.setView([bagLat,bagLon],16);
+
+    updateDistance();
+
+  } else {
+
+    document.getElementById("bag").innerHTML =
+      "GPS signal not available";
+  }
+
+  document.getElementById("alarm").innerHTML =
+    data.alarm ?
+    "VIBRATION ALARM ACTIVE" :
+    "ARMED";
+}
+
+// ---------- RECEIVE BLUETOOTH DATA ----------
+
+function handleBLEData(event) {
+
+  try {
+
+    const value = event.target.value;
+
+    const text = new TextDecoder().decode(value);
+
+    const data = JSON.parse(text);
+
+    updateBag(data);
+
+  } catch(error) {
+
+    console.log("Data error:",error);
+  }
+}
+
+// ---------- CONNECT ESP32 ----------
+
+async function connectBluetooth() {
+
+  try {
+
+    document.getElementById("connection").innerHTML =
+      "Searching for ESP32...";
+
+    const device = await navigator.bluetooth.requestDevice({
+
+      filters: [
+        {name: "SMART_BAG_BLE"}
+      ],
+
+      optionalServices: [SERVICE_UUID]
+
+    });
+
+    device.addEventListener(
+      "gattserverdisconnected",
+      function() {
+
+        document.getElementById("connection").innerHTML =
+          "Bluetooth Disconnected";
+      }
+    );
+
+    const server = await device.gatt.connect();
+
+    const service =
+      await server.getPrimaryService(SERVICE_UUID);
+
+    const characteristic =
+      await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+    await characteristic.startNotifications();
+
+    characteristic.addEventListener(
+      "characteristicvaluechanged",
+      handleBLEData
+    );
+
+    document.getElementById("connection").innerHTML =
+      "CONNECTED TO SMART BAG";
+
+    // Read initial data
+    const initialValue = await characteristic.readValue();
+
+    handleBLEData({
+      target: {value: initialValue}
+    });
+
+  } catch(error) {
+
+    document.getElementById("connection").innerHTML =
+      "Connection failed";
+
+    alert(error.message);
+
+    console.log(error);
+  }
+}
+
+</script>
+
+</body>
+</html>
